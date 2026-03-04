@@ -5,6 +5,7 @@ import requests
 
 BACKEND = os.getenv("BACKEND_URL", "http://localhost:8000")
 
+
 st.set_page_config(page_title="MAS RAG System", page_icon="🤖")
 st.title("🤖 MAS RAG System")
 
