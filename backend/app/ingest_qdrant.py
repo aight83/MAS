@@ -6,6 +6,11 @@ from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
 from qdrant_client.models import SparseVectorParams, SparseIndexParams
 import uuid
+from qdrant_client.models import models as qmodels
+from fastembed import TextEmbedding
+
+
+MODEL_NAME = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 
 COLLECTION_NAME = "knowledge_base"
 
@@ -55,43 +60,49 @@ DOCUMENTS = [
         "metadata": {"type": "product", "title": "Наушники Sony"}
     },
 ]
-
 def ingest():
-    client = QdrantClient(
-        host=os.getenv("QDRANT_HOST", "localhost"),
-        port=int(os.getenv("QDRANT_PORT", 6333)),
-    )
+    import time
+    client = QdrantClient(host=os.getenv("QDRANT_HOST", "localhost"), port=int(os.getenv("QDRANT_PORT", 6333)))
 
-    # Создаём коллекцию если не существует
+    for attempt in range(10):
+        try:
+            client.get_collections()
+            print("Qdrant is ready.")
+            break
+        except Exception:
+            print(f"Waiting for Qdrant... ({attempt + 1}/10)")
+            time.sleep(3)
+    else:
+        raise RuntimeError("Qdrant not available")
+
     existing = [c.name for c in client.get_collections().collections]
     if COLLECTION_NAME in existing:
-        print(f"Collection '{COLLECTION_NAME}' already exists, deleting...")
         client.delete_collection(COLLECTION_NAME)
 
-    # Создаём коллекцию с dense векторами
-    # Qdrant FastEmbed автоматически создаёт эмбеддинги через query()
+    # Вычисляем эмбеддинги
+    embedder = TextEmbedding(MODEL_NAME)
+    texts = [doc["text"] for doc in DOCUMENTS]
+    embeddings = list(embedder.embed(texts))
+
+    # Создаём коллекцию вручную
     client.create_collection(
         collection_name=COLLECTION_NAME,
-        vectors_config=VectorParams(
-            size=384,           # размер вектора для модели all-MiniLM-L6-v2
-            distance=Distance.COSINE,
-        ),
-    )
-    print(f"Collection '{COLLECTION_NAME}' created.")
-
-    # Загружаем документы через add() — он сам создаёт эмбеддинги
-    client.add(
-        collection_name=COLLECTION_NAME,
-        documents=[doc["text"] for doc in DOCUMENTS],
-        metadata=[doc["metadata"] for doc in DOCUMENTS],
-        ids=[doc["id"] for doc in DOCUMENTS],
+        vectors_config=VectorParams(size=len(embeddings[0]), distance=Distance.COSINE),
     )
 
-    print(f"Ingested {len(DOCUMENTS)} documents into '{COLLECTION_NAME}'.")
-    
-    # Проверка
+    # Загружаем точки
+    points = [
+        PointStruct(
+            id=doc["id"],
+            vector=embeddings[i].tolist(),
+            payload={"document": doc["text"], **doc["metadata"]},
+        )
+        for i, doc in enumerate(DOCUMENTS)
+    ]
+    client.upsert(collection_name=COLLECTION_NAME, points=points)
+
     count = client.count(collection_name=COLLECTION_NAME)
-    print(f"Total documents in collection: {count.count}")
+    print(f"Ingested. Total: {count.count} docs.")
 
 if __name__ == "__main__":
     ingest()

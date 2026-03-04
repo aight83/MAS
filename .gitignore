@@ -10,3 +10,10 @@ wheels/
 .venv
 
 .env
+
+.git
+.venv
+__pycache__
+*.pyc
+*.pyo
+.env

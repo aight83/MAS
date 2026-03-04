@@ -1,12 +1,20 @@
 from dotenv import load_dotenv
 import os
+import re
 import psycopg2
 import boto3
+from qdrant_client import models as qdrant_models
 from qdrant_client import QdrantClient
 from qdrant_client.models import SearchRequest
 from strands.models import BedrockModel
 from strands import Agent, tool
 from strands.models.litellm import LiteLLMModel
+from qdrant_client import models
+from fastembed import TextEmbedding
+
+MODEL_NAME = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+embedder = TextEmbedding(MODEL_NAME)
+_last_sources: list[str] = [] 
 
 load_dotenv()
 
@@ -36,39 +44,49 @@ qdrant = QdrantClient(
     host=os.getenv("QDRANT_HOST", "localhost"),
     port=int(os.getenv("QDRANT_PORT", 6333)),
 )
+
 COLLECTION_NAME = "knowledge_base"
 
 @tool
 def search_knowledge_base(query: str) -> str:
-    """Searches the vector database for text documents, policies, and guides. Input should be a short search query."""
+    global _last_sources
     try:
-        # Dense search
-        results = qdrant.query(
+        query_vector = list(embedder.embed([query]))[0].tolist()
+        results = qdrant.query_points(
             collection_name=COLLECTION_NAME,
-            query_text=query,
+            query=query_vector,
             limit=3,
-        )
+            with_payload=True,
+        ).points
         if not results:
             return "No relevant documents found."
+
+        _last_sources = list({r.payload.get("title", "unknown") for r in results})
+        print(f">>> _last_sources set: {_last_sources}")  # проверка
+
         return "\n\n".join([
-            f"[Source {i+1}]: {r.document}" 
+            f"[Source {i+1}] ({r.payload.get('title', 'unknown')}): {r.payload.get('document', '')}"
             for i, r in enumerate(results)
         ])
     except Exception as e:
+        print(f">>> [search_knowledge_base] ERROR: {e}")
         return f"Knowledge base unavailable: {str(e)}"
+
+
+
     
 rag_agent = Agent(
     model=model,
     system_prompt="""You are a strict Retrieval-Augmented Generation (RAG) assistant.
-Your ONLY source of knowledge is the `search_knowledge_base` tool.
+        Your ONLY source of knowledge is the `search_knowledge_base` tool.
 
-Rules:
-1. ALWAYS call `search_knowledge_base` first.
-2. NEVER use your internal knowledge.
-3. If the tool returns "No relevant documents found", reply exactly: "I cannot find the answer in the knowledge base."
-4. Base your answer STRICTLY on the tool's output.
-
-Output your final answer directly, followed by a list of sources used (e.g. "[Source 1]").""",
+        Rules:
+        1. ALWAYS call `search_knowledge_base` first before answering.
+        2. NEVER use your internal knowledge or make assumptions.
+        3. If the tool returns "No relevant documents found", reply EXACTLY: "I cannot find the answer in the knowledge base."
+        4. Base your answer STRICTLY and ONLY on the tool's returned text.
+        5. Output ONLY the answer. Do NOT append source tags, citations, or any metadata.
+        """,
     tools=[search_knowledge_base],
 )
 
@@ -83,6 +101,14 @@ def get_pg_connection():
         dbname=os.getenv("POSTGRES_DB"),
     )
 
+def _extract_tables_from_sql(sql: str) -> list[str]:
+    """Извлекает имена таблиц из SQL-запроса через FROM и JOIN."""
+    # Ищем слова после FROM и JOIN (LEFT/RIGHT/INNER/OUTER JOIN тоже)
+    pattern = r'(?:FROM|JOIN)\s+([a-zA-Z_][a-zA-Z0-9_]*)'
+    tables = re.findall(pattern, sql, re.IGNORECASE)
+    return list(set(tables))  # убираем дубли
+
+
 @tool
 def get_db_schema() -> str:
     """Returns the names of all tables and columns in the SQL database."""
@@ -93,27 +119,36 @@ def get_db_schema() -> str:
     - product_catalog(id, name, description, price, category)
     """
     return schema
-
 @tool
 def execute_sql(sql_query: str) -> str:
-    """Executes a PostgreSQL SELECT query and returns the real data from the database. Input MUST be a valid SQL string."""
-    print(f">>> [execute_sql] CALLED WITH: {sql_query}")  
+    """Executes a PostgreSQL SELECT query and returns the real data from the database."""
+    global _last_sources
+    print(f">>> [execute_sql] CALLED WITH: {sql_query}")
     try:
         conn = get_pg_connection()
         cur = conn.cursor()
-        # Safety: only SELECT
+
         if not sql_query.strip().upper().startswith("SELECT"):
             return "Error: only SELECT queries are allowed."
+
         cur.execute(sql_query)
         rows = cur.fetchall()
         columns = [desc[0] for desc in cur.description]
         cur.close()
         conn.close()
+
+        # ✅ Трекаем таблицы — аналогично _last_sources в RAG
+        tables = _extract_tables_from_sql(sql_query)
+        _last_sources = [f"sql:{t}" for t in tables]
+        print(f">>> _last_sources set: {_last_sources}")
+
         if not rows:
             return "Query returned no results."
+
         result = " | ".join(columns) + "\n"
         result += "\n".join([" | ".join(str(v) for v in row) for row in rows])
         return result
+
     except Exception as e:
         return f"SQL Error: {str(e)}"
     
@@ -141,23 +176,23 @@ Format your final response simply, including the data you found.""",
 
 @tool
 def delegate_to_rag(query: str) -> str:
-    """Call the RAG agent and return its structured plain-text output.
-
-    Guidance: return the RAG agent's answer exactly as produced, including
-    the `Sources:` and `Confidence:` sections.
-    """
+    """Routes the query to the RAG agent. Returns a plain-text answer based strictly on the knowledge base."""
     result = rag_agent(query)
-    return result.message
+    msg = result.message
+    content = msg.get("content", "") if isinstance(msg, dict) else msg
+    if isinstance(content, list):
+        return " ".join(b.get("text", "") for b in content if isinstance(b, dict))
+    return str(content)
 
 @tool
 def delegate_to_sql(query: str) -> str:
-    """Call the SQL agent and return its structured plain-text output.
-
-    Guidance: return the SQL statement and the tabular results as the agent
-    produces them, and include any `Notes:` the agent supplies.
-    """
+    """Routes the query to the SQL agent. Returns tabular data retrieved from the database."""
     result = sql_agent(query)
-    return result.message
+    msg = result.message
+    content = msg.get("content", "") if isinstance(msg, dict) else msg
+    if isinstance(content, list):
+        return " ".join(b.get("text", "") for b in content if isinstance(b, dict))
+    return str(content)
 
 orchestrator = Agent(
     model=model,

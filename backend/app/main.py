@@ -3,8 +3,10 @@ import uuid
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from .agents import orchestrator
+
 from .memory import save_log, get_history
+from .agents import orchestrator
+from . import agents
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -34,6 +36,7 @@ class InvokeResponse(BaseModel):
 async def health():
     return {"status": "ok"}
 
+
 @app.post("/invoke", response_model=InvokeResponse)
 async def invoke(request: InvokeRequest):
     chat_id = request.chat_id or str(uuid.uuid4())
@@ -44,8 +47,17 @@ async def invoke(request: InvokeRequest):
         result = orchestrator(request.query)
         elapsed = time.time() - start
 
-        response_text = str(result)
+        # ✅ Правильное извлечение текста
+        msg = result.message
+        content = msg.get("content", "")
+        if isinstance(content, list):
+            response_text = " ".join(
+                block.get("text", "") for block in content if isinstance(block, dict)
+            )
+        else:
+            response_text = str(content)
 
+        # Токены
         usage = result.metrics.accumulated_usage
         input_tokens  = usage.get("inputTokens", 0)
         output_tokens = usage.get("outputTokens", 0)
@@ -57,8 +69,11 @@ async def invoke(request: InvokeRequest):
             "total_tokens": total_tokens,
         }
 
-        sources = []
-
+        sources = agents._last_sources.copy()
+        agents._last_sources.clear()
+        print(f">>> sources in response: {sources}")
+    
+    
         await save_log(
             chat_id=chat_id,
             user_id=user_id,
