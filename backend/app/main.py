@@ -1,27 +1,31 @@
 import time
 import uuid
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header
 from pydantic import BaseModel
+from typing import Optional
 
-from .memory import save_log, get_history
 from .agents import orchestrator
 from . import agents
+from .memory import save_log, get_history, get_user_chats, init_db
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    await init_db()
     print("MAS RAG System started")
     yield
     print("MAS RAG System stopped")
 
+
 app = FastAPI(title="MAS RAG System", lifespan=lifespan)
 
-# ─── Schemas ──────────────────────────────────────────────────────────────────
+
+# Schemas
 
 class InvokeRequest(BaseModel):
     query: str
-    chat_id: str = None
-    user_id: str = None
+    chat_id: Optional[str] = None 
 
 class InvokeResponse(BaseModel):
     response: str
@@ -30,7 +34,22 @@ class InvokeResponse(BaseModel):
     chat_id: str
     time_taken: float
 
-# ─── Routes ───────────────────────────────────────────────────────────────────
+class ChatListItem(BaseModel):
+    chat_id: str
+    preview: str        # первый вопрос пользователя
+    created_at: float   # timestamp
+
+
+# Auth
+
+def get_current_user(x_username: Optional[str] = Header(default=None)) -> str:
+    """Просто берём имя из хедера. Без пароля — для демо."""
+    if not x_username or not x_username.strip():
+        raise HTTPException(status_code=401, detail="Header X-Username is required")
+    return x_username.strip()
+
+
+# Routes
 
 @app.get("/health")
 async def health():
@@ -38,52 +57,47 @@ async def health():
 
 
 @app.post("/invoke", response_model=InvokeResponse)
-async def invoke(request: InvokeRequest):
+async def invoke(
+    request: InvokeRequest,
+    x_username: Optional[str] = Header(default=None),
+):
+    username = get_current_user(x_username)
+
     chat_id = request.chat_id or str(uuid.uuid4())
-    user_id = request.user_id or str(uuid.uuid4())
 
     try:
         start = time.time()
         result = orchestrator(request.query)
         elapsed = time.time() - start
 
-        # ✅ Правильное извлечение текста
         msg = result.message
-        content = msg.get("content", "")
+        content = msg.get("content", "") if isinstance(msg, dict) else msg
         if isinstance(content, list):
             response_text = " ".join(
-                block.get("text", "") for block in content if isinstance(block, dict)
+                b.get("text", "") for b in content if isinstance(b, dict)
             )
         else:
             response_text = str(content)
 
-        # Токены
         usage = result.metrics.accumulated_usage
-        input_tokens  = usage.get("inputTokens", 0)
-        output_tokens = usage.get("outputTokens", 0)
-        total_tokens  = usage.get("totalTokens", 0)
-
         token_usage = {
-            "prompt_tokens": input_tokens,
-            "completion_tokens": output_tokens,
-            "total_tokens": total_tokens,
+            "prompt_tokens":     usage.get("inputTokens", 0),
+            "completion_tokens": usage.get("outputTokens", 0),
+            "total_tokens":      usage.get("totalTokens", 0),
         }
 
         sources = agents._last_sources.copy()
         agents._last_sources.clear()
-        print(f">>> sources in response: {sources}")
-    
-    
+
         await save_log(
             chat_id=chat_id,
-            user_id=user_id,
-            full_name="demo_user",
+            username=username,     
             query=request.query,
             answer=response_text,
             sources_links=sources,
             time_taken=elapsed,
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
+            input_tokens=token_usage["prompt_tokens"],
+            output_tokens=token_usage["completion_tokens"],
             total_cost_usd=0.0,
         )
 
@@ -99,7 +113,19 @@ async def invoke(request: InvokeRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/chats", response_model=list[ChatListItem])
+async def list_chats(x_username: Optional[str] = Header(default=None)):
+    """Returns a list of user's chats with the first question as a preview."""
+    username = get_current_user(x_username)
+    return await get_user_chats(username)
+
+
 @app.get("/history/{chat_id}")
-async def get_chat_history(chat_id: str):
+async def get_chat_history(
+    chat_id: str,
+    x_username: Optional[str] = Header(default=None),
+):
+    """History of a specific chat."""
+    get_current_user(x_username) 
     history = await get_history(chat_id)
     return {"chat_id": chat_id, "messages": history}

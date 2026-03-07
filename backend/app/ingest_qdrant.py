@@ -1,68 +1,100 @@
 from dotenv import load_dotenv
 load_dotenv()
+from pathlib import Path
 
 import os
 from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams, PointStruct
+from qdrant_client.models import Distance, SparseVector, VectorParams, PointStruct
 from qdrant_client.models import SparseVectorParams, SparseIndexParams
 import uuid
 from qdrant_client.models import models as qmodels
-from fastembed import TextEmbedding
+from fastembed import TextEmbedding, SparseTextEmbedding
+from qdrant_client.models import (
+    VectorParams, Distance, SparseVectorParams, SparseIndexParams
+)
 
 
-MODEL_NAME = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+DENSE_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+SPARSE_MODEL = "Qdrant/bm25"
+sparse_embedder = SparseTextEmbedding(SPARSE_MODEL)
 
 COLLECTION_NAME = "knowledge_base"
 
-# Тестовые документы — FAQ и политики магазина
-DOCUMENTS = [
+from dotenv import load_dotenv
+load_dotenv()
+
+import os
+import uuid
+from pathlib import Path
+from qdrant_client import QdrantClient
+from qdrant_client.models import (
+    Distance, SparseVector, VectorParams, PointStruct,
+    SparseVectorParams, SparseIndexParams
+)
+from fastembed import TextEmbedding, SparseTextEmbedding
+
+DENSE_MODEL  = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+SPARSE_MODEL = "Qdrant/bm25"
+COLLECTION_NAME = "knowledge_base"
+DATA_DIR = os.getenv("DATA_DIR", "/app/data")
+
+
+# Hardcoded for fallback
+
+HARDCODED_DOCUMENTS = [
     {
-        "id": str(uuid.uuid4()),
-        "text": "Возврат товара возможен в течение 14 дней с момента покупки. "
-                "Товар должен быть в оригинальной упаковке и без следов использования. "
-                "Для оформления возврата обратитесь в службу поддержки с номером заказа.",
-        "metadata": {"type": "policy", "title": "Политика возврата"}
-    },
-    {
-        "id": str(uuid.uuid4()),
-        "text": "Доставка осуществляется по всему Казахстану. "
-                "Стандартная доставка занимает 3-5 рабочих дней. "
-                "Экспресс-доставка доступна в Алматы и Астане — 1-2 дня. "
-                "Доставка бесплатна при заказе от 50000 тенге.",
-        "metadata": {"type": "policy", "title": "Условия доставки"}
-    },
-    {
-        "id": str(uuid.uuid4()),
-        "text": "MacBook Pro — профессиональный ноутбук Apple с процессором M3 Pro. "
-                "Оснащён дисплеем Liquid Retina XDR 16 дюймов, до 36 ГБ оперативной памяти "
-                "и батареей до 22 часов работы. Идеален для разработки, видеомонтажа и дизайна.",
-        "metadata": {"type": "product", "title": "MacBook Pro"}
-    },
-    {
-        "id": str(uuid.uuid4()),
-        "text": "iPhone 15 оснащён чипом A16 Bionic, камерой 48 МП и Dynamic Island. "
-                "Поддерживает USB-C зарядку и передачу данных. "
-                "Доступен в цветах: чёрный, синий, розовый, жёлтый, зелёный.",
-        "metadata": {"type": "product", "title": "iPhone 15"}
-    },
-    {
-        "id": str(uuid.uuid4()),
-        "text": "Гарантия на все товары составляет 12 месяцев с момента покупки. "
-                "Гарантийный ремонт осуществляется бесплатно при наличии заводского брака. "
-                "Физические повреждения и залитие жидкостью под гарантию не попадают.",
-        "metadata": {"type": "policy", "title": "Гарантийные условия"}
-    },
-    {
-        "id": str(uuid.uuid4()),
-        "text": "Наушники Sony WH-1000XM5 с активным шумоподавлением. "
-                "До 30 часов работы от аккумулятора, быстрая зарядка 10 минут = 5 часов работы. "
-                "Поддержка Hi-Res Audio, LDAC и мультиподключения к двум устройствам.",
-        "metadata": {"type": "product", "title": "Наушники Sony"}
+        "text": "Возврат товара возможен в течение 14 дней...",
+        "source": "hardcoded",
+        "title": "Политика возврата",
+        "type": "policy",
     },
 ]
+
+
+def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50) -> list[str]:
+    chunks = []
+    start = 0
+    while start < len(text):
+        end = start + chunk_size
+        chunks.append(text[start:end])
+        start += chunk_size - overlap
+    return [c.strip() for c in chunks if c.strip()]
+
+
+def load_from_directory(data_dir: str) -> list[dict]:
+    path = Path(data_dir)
+    print(f">>> DATA_DIR = {data_dir}")
+    print(f">>> Path exists: {path.exists()}")
+
+    if not path.exists():
+        print("DATA_DIR не найден")
+        return []
+
+    all_files = list(path.rglob("*.txt")) + list(path.rglob("*.md"))
+    print(f">>> Files found: {[f.name for f in all_files]}")
+
+    result = []
+    for file in all_files:
+        text = file.read_text(encoding="utf-8", errors="ignore")
+        chunks = chunk_text(text)
+        for chunk in chunks:
+            result.append({
+                "text":   chunk,
+                "source": str(file),
+                "title":  file.stem,
+            })
+        print(f"  ✅ {file.name} → {len(chunks)} чанков")
+
+    print(f">>> Total chunks from files: {len(result)}")
+    return result
+
+
 def ingest():
     import time
-    client = QdrantClient(host=os.getenv("QDRANT_HOST", "localhost"), port=int(os.getenv("QDRANT_PORT", 6333)))
+    client = QdrantClient(
+        host=os.getenv("QDRANT_HOST", "localhost"),
+        port=int(os.getenv("QDRANT_PORT", 6333))
+    )
 
     for attempt in range(10):
         try:
@@ -75,34 +107,64 @@ def ingest():
     else:
         raise RuntimeError("Qdrant not available")
 
+    # Documents to ingest
+    file_docs = load_from_directory(DATA_DIR)
+
+    hardcoded = [
+        {"text": d["text"], "source": d["source"], "title": d["title"]}
+        for d in HARDCODED_DOCUMENTS
+    ]
+
+    all_docs = file_docs + hardcoded
+    print(f"📊 Итого к индексации: {len(all_docs)} чанков")
+
+    # Embeddings
+    dense_embedder  = TextEmbedding(DENSE_MODEL)
+    sparse_embedder = SparseTextEmbedding(SPARSE_MODEL)
+
+    texts             = [d["text"] for d in all_docs]
+    dense_embeddings  = list(dense_embedder.embed(texts))
+    sparse_embeddings = list(sparse_embedder.embed(texts))
+
+    # Collection setup
     existing = [c.name for c in client.get_collections().collections]
     if COLLECTION_NAME in existing:
         client.delete_collection(COLLECTION_NAME)
 
-    # Вычисляем эмбеддинги
-    embedder = TextEmbedding(MODEL_NAME)
-    texts = [doc["text"] for doc in DOCUMENTS]
-    embeddings = list(embedder.embed(texts))
-
-    # Создаём коллекцию вручную
     client.create_collection(
         collection_name=COLLECTION_NAME,
-        vectors_config=VectorParams(size=len(embeddings[0]), distance=Distance.COSINE),
+        vectors_config={
+            "dense": VectorParams(size=len(dense_embeddings[0]), distance=Distance.COSINE),
+        },
+        sparse_vectors_config={
+            "sparse": SparseVectorParams(index=SparseIndexParams(on_disk=False))
+        },
     )
 
-    # Загружаем точки
+    # Loading points
     points = [
         PointStruct(
-            id=doc["id"],
-            vector=embeddings[i].tolist(),
-            payload={"document": doc["text"], **doc["metadata"]},
+            id=str(uuid.uuid4()),
+            vector={
+                "dense": dense_embeddings[i].tolist(),
+                "sparse": SparseVector(
+                    indices=sparse_embeddings[i].indices.tolist(),
+                    values=sparse_embeddings[i].values.tolist(),
+                ),
+            },
+            payload={
+                "document":  doc["text"],
+                "title":     doc["title"],
+                "file_path": doc["source"],
+            },
         )
-        for i, doc in enumerate(DOCUMENTS)
+        for i, doc in enumerate(all_docs)
     ]
     client.upsert(collection_name=COLLECTION_NAME, points=points)
 
     count = client.count(collection_name=COLLECTION_NAME)
-    print(f"Ingested. Total: {count.count} docs.")
+    print(f"✅ Ingested {count.count} docs with dense + sparse vectors")
+
 
 if __name__ == "__main__":
     ingest()

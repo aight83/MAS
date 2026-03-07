@@ -11,6 +11,10 @@ from strands import Agent, tool
 from strands.models.litellm import LiteLLMModel
 from qdrant_client import models
 from fastembed import TextEmbedding
+from fastembed import SparseTextEmbedding
+from qdrant_client.models import Prefetch, FusionQuery, Fusion
+
+sparse_embedder = SparseTextEmbedding("Qdrant/bm25")
 
 MODEL_NAME = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 embedder = TextEmbedding(MODEL_NAME)
@@ -26,19 +30,19 @@ load_dotenv()
 
 
 model = LiteLLMModel(
-    model_id="openai/gpt-oss-120b",  # Используем openai/ префикс
+    model_id="openai/gpt-oss-120b",  
     params={
         "api_key": os.getenv("AI_STUDIO_API_KEY"),
         "api_base": "https://api.cerebras.ai/v1",
-        "max_tokens": 3000,           # Строгий лимит на генерацию в 1 запросе (хватит для ответа и тулов)
-        "temperature": 0.1            # Снижаем креативность, чтобы агент не галлюцинировал
+        "max_tokens": 3000,           
+        "temperature": 0.1            
     }
 )
 
 
 
 
-# ─── RAG Agent ────────────────────────────────────────────────────────────────
+# RAG Agent
 
 qdrant = QdrantClient(
     host=os.getenv("QDRANT_HOST", "localhost"),
@@ -51,27 +55,38 @@ COLLECTION_NAME = "knowledge_base"
 def search_knowledge_base(query: str) -> str:
     global _last_sources
     try:
-        query_vector = list(embedder.embed([query]))[0].tolist()
+        # Dense vector (MiniLM)
+        dense_vec = list(embedder.embed([query]))[0].tolist()
+
+        # Sparse vector (MiniLM) (BM25)
+        sparse_result = list(sparse_embedder.embed([query]))[0]
+        sparse_vec = models.SparseVector(
+            indices=sparse_result.indices.tolist(),
+            values=sparse_result.values.tolist(),
+        )
+
+        # Hybrid Search
         results = qdrant.query_points(
             collection_name=COLLECTION_NAME,
-            query=query_vector,
+            prefetch=[
+                Prefetch(query=dense_vec,   using="dense",  limit=5),
+                Prefetch(query=sparse_vec,  using="sparse", limit=5),
+            ],
+            query=FusionQuery(fusion=Fusion.RRF),  # fuse
             limit=3,
             with_payload=True,
         ).points
+
         if not results:
             return "No relevant documents found."
 
         _last_sources = list({r.payload.get("title", "unknown") for r in results})
-        print(f">>> _last_sources set: {_last_sources}")  # проверка
-
         return "\n\n".join([
             f"[Source {i+1}] ({r.payload.get('title', 'unknown')}): {r.payload.get('document', '')}"
             for i, r in enumerate(results)
         ])
     except Exception as e:
-        print(f">>> [search_knowledge_base] ERROR: {e}")
         return f"Knowledge base unavailable: {str(e)}"
-
 
 
     
@@ -91,7 +106,7 @@ rag_agent = Agent(
 )
 
 
-# ─── Text2SQL Agent ───────────────────────────────────────────────────────────
+# Text2SQL Agent 
 def get_pg_connection():
     return psycopg2.connect(
         host=os.getenv("POSTGRES_HOST", "localhost"),
@@ -102,11 +117,10 @@ def get_pg_connection():
     )
 
 def _extract_tables_from_sql(sql: str) -> list[str]:
-    """Извлекает имена таблиц из SQL-запроса через FROM и JOIN."""
-    # Ищем слова после FROM и JOIN (LEFT/RIGHT/INNER/OUTER JOIN тоже)
+    """Exctracts table names from a SQL query using regex."""
     pattern = r'(?:FROM|JOIN)\s+([a-zA-Z_][a-zA-Z0-9_]*)'
     tables = re.findall(pattern, sql, re.IGNORECASE)
-    return list(set(tables))  # убираем дубли
+    return list(set(tables))
 
 
 @tool
@@ -137,9 +151,8 @@ def execute_sql(sql_query: str) -> str:
         cur.close()
         conn.close()
 
-        # ✅ Трекаем таблицы — аналогично _last_sources в RAG
         tables = _extract_tables_from_sql(sql_query)
-        _last_sources = [f"sql:{t}" for t in tables]
+        _last_sources = [f"sql://{t}" for t in tables]
         print(f">>> _last_sources set: {_last_sources}")
 
         if not rows:
@@ -172,7 +185,7 @@ Format your final response simply, including the data you found.""",
 )
 
 
-# ─── Orchestrator Agent ───────────────────────────────────────────────────────
+# Orchestrator Agent
 
 @tool
 def delegate_to_rag(query: str) -> str:

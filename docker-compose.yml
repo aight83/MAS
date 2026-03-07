@@ -21,6 +21,10 @@ services:
       dockerfile: backend/Dockerfile
     env_file: .env
     command: ["python", "backend/app/ingest_qdrant.py"]   # ← путь к файлу, не модуль
+    volumes:
+      - ./data:/app/data
+    environment:
+      - DATA_DIR=/app/data
     depends_on:
       qdrant:
         condition: service_started
@@ -33,6 +37,16 @@ services:
       - "27017:27017"
     volumes:
       - mongo_data:/data/db
+
+  mongo-express:
+    image: mongo-express:latest
+    ports:
+      - "8081:8081"
+    environment:
+      - ME_CONFIG_MONGODB_URL=${MONGO_URI}
+      - ME_CONFIG_BASICAUTH=false
+    depends_on:
+      - mongodb
 
   qdrant:
     image: qdrant/qdrant:latest
@@ -50,6 +64,7 @@ services:
       - "8000:8000"
     volumes:
       - ./backend/app:/app/backend/app
+      - ./data:/app/data
     depends_on:
       postgres:
         condition: service_healthy
