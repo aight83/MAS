@@ -31,8 +31,8 @@ Once the application is running, you can access the following services on your l
 | **API Docs** | http://localhost:8000/docs | Interactive Swagger UI for API testing |
 | **MongoDB Admin** | http://localhost:8081 | Mongo Express - MongoDB database management (To see history of chats) |
 | **Vector Database** | http://localhost:6333 | Qdrant - Vector store for RAG |
-| **PostgreSQL** | localhost:5432 | PostgreSQL database - Conversation history & memory |
-| **MongoDB** | localhost:27017 | MongoDB - Document storage |
+| **PostgreSQL** | localhost:5432 | PostgreSQL database - For text2sql agent |
+| **MongoDB** | localhost:27017 | MongoDB - Stores conversation history and user memory |
 
 ## Services Overview
 
@@ -47,8 +47,8 @@ Once the application is running, you can access the following services on your l
 - **API Documentation:** http://localhost:8000/docs
 
 ### Databases
-- **PostgreSQL (5432):** Stores conversation history and user memory
-- **MongoDB (27017):** Stores documents and application data
+- **PostgreSQL (5432):** For text2sql agent
+- **MongoDB (27017):** Stores conversation history and user memory
 - **Qdrant (6333):** Vector database for semantic search and RAG
 
 ### Admin Interfaces
