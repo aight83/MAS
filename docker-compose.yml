@@ -20,7 +20,7 @@ services:
       context: .
       dockerfile: backend/Dockerfile
     env_file: .env
-    command: ["python", "backend/app/ingest_qdrant.py"]   # ← путь к файлу, не модуль
+    command: ["python", "backend/app/ingest_qdrant.py"] 
     volumes:
       - ./data:/app/data
     environment:
