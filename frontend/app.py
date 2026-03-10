@@ -129,56 +129,58 @@ for msg in st.session_state.messages:
                     for src in meta["sources"]:
                         st.badge(src)
 
-# Ввод
 query = st.chat_input("Ask a question...")
 
 if query:
     st.session_state.messages.append({"role": "user", "content": query})
     with st.chat_message("user"):
-        st.write(query)
+        st.markdown(query)
+
+    answer = ""
+    meta = {}
 
     with st.chat_message("assistant"):
-        with st.spinner("Thinking..."):
+        with st.spinner("Думаю..."):
             try:
                 res = requests.post(
                     f"{BACKEND}/invoke",
-                    json={
-                        "query":   query,
-                        "chat_id": st.session_state.chat_id,
-                    },
-                    headers=headers(), 
+                    json={"query": query, "chat_id": st.session_state.chat_id},
+                    headers=headers(),
                     timeout=60,
                 )
                 data = res.json()
 
                 if not res.ok:
-                    raise Exception(data.get("detail", "Unknown error"))
+                    raise Exception(data.get("detail", "Неизвестная ошибка"))
 
                 answer = data["response"]
                 st.markdown(answer)
 
-                with st.expander("ℹ️ Details"):
+                meta = {
+                    "time_taken": data.get("time_taken", 0),
+                    "tokens":     data.get("token_usage", {}).get("total_tokens", 0),
+                    "chat_id":    data.get("chat_id", st.session_state.chat_id),
+                    "sources":    data.get("sources", []),
+                }
+
+                with st.expander("ℹ️ Детали"):
                     col1, col2, col3 = st.columns(3)
-                    col1.metric("⏱ Time", f"{data['time_taken']}s")
-                    col2.metric("🔢 Tokens", data["token_usage"]["total_tokens"])
-                    col3.metric("💬 Chat ID", data["chat_id"][:8] + "...")
-                    if data["sources"]:
-                        st.write("📚 Sources:")
-                        for src in data["sources"]:
+                    col1.metric("⏱ Время",   f"{meta['time_taken']}s")
+                    col2.metric("🔢 Токены", meta["tokens"])
+                    col3.metric("💬 Chat ID", meta["chat_id"][:8] + "...")
+                    if meta["sources"]:
+                        st.write("📚 Источники:")
+                        for src in meta["sources"]:
                             st.badge(src)
 
+                st.session_state.chat_id = meta["chat_id"]
+
             except Exception as e:
-                answer = f"Error: {str(e)}"
+                answer = f"Ошибка: {str(e)}"
                 st.error(answer)
 
     st.session_state.messages.append({
-    "role": "assistant",
-    "content": answer,
-    "meta": {
-        "time_taken":  data["time_taken"],
-        "tokens":      data["token_usage"]["total_tokens"],
-        "chat_id":     data["chat_id"],
-        "sources":     data["sources"],
-        }
+        "role":    "assistant",
+        "content": answer,
+        "meta":    meta,  
     })
-    st.session_state.chat_id = data.get("chat_id", st.session_state.chat_id)
