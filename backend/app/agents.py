@@ -31,6 +31,7 @@ load_dotenv()
 
 model = LiteLLMModel(
     model_id="openai/gpt-oss-120b",  
+    # model_id="openai/llama3.1-8b",
     params={
         "api_key": os.getenv("AI_STUDIO_API_KEY"),
         "api_base": "https://api.cerebras.ai/v1",

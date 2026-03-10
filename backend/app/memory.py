@@ -61,21 +61,22 @@ async def get_history(chat_id: str, limit: int = 50) -> list:
 async def get_user_chats(username: str) -> list:
     """Возвращает уникальные чаты пользователя — первый вопрос как preview."""
     pipeline = [
-        {"$match": {"username": username}},
-        {"$sort":  {"ttl": 1}},                    # хронологически
-        {"$group": {                                 # группируем по chat_id
+        {"$match": {"full_name": username}},
+        {"$sort":  {"ttl": 1}},
+        {"$group": {
             "_id":        "$dialog_id",
-            "preview":    {"$first": "$query"},     # первый вопрос
+            "preview":    {"$first": "$query"},
             "created_at": {"$first": "$ttl"},
         }},
-        {"$sort": {"created_at": -1}},             # свежие сначала
+        {"$sort": {"created_at": -1}},
         {"$limit": 20},
     ]
     result = []
     async for doc in collection.aggregate(pipeline):
+        preview = doc["preview"] or ""
         result.append({
             "chat_id":    doc["_id"],
-            "preview":    (doc["preview"] or "")[:60] + "...",
+            "preview":    preview[:60] + ("..." if len(preview) > 60 else ""),
             "created_at": doc["created_at"],
         })
     return result
